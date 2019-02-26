@@ -1,0 +1,330 @@
+---------------------------------------------------------------------------------------------------------------
+--	Create Database 
+
+	create database viddb;
+
+---------------------------------------------------------------------------------------------------------------
+---------------------------------------------------------------------------------------------------------------
+-- Adding the Jars 
+ADD JAR /opt/cloudera/parcels/CDH/lib/hive/lib/hive-hcatalog-core-1.1.0-cdh5.11.2.jar;
+---------------------------------------------------------------------------------------------------------------
+---------------------------------------------------------------------------------------------------------------
+--	Assumptions 
+---------------------------------------------------------------------------------------------------------------
+--	a. All the columns with discrete numeric values are taken as integer ie, RateCodeID , payment_type
+--	b. The drop off times if it falls in 2018 is not valid.
+--	c. passenger count is valid from 1 to 8. Trips with no passenger or more than 8 passenger is invalid.
+--	d. trip distance is all valid if the values are above 0. very small trips would also be considered valid.
+--	e. fare amount is all valid as long as it is positive and more than 0.
+--	f. Rate code id is valid if between 1- 6
+--	g. Extra charges can be either 0, 0.5 ,1 and 1.5(Inference based on Data Dictionary)
+--	h. mta_tax can be either 0  or 0.5 (Inference based on Data Dictionary)
+--	i. Tip amount for credit card payment it is populated and should be non negative and less than fare amount (Inference based on Data Dictio
+--	      For non credit card payment, this field has to be 0 as cash tips are not included
+--	j. Tolls amount should not be negative
+--	k. Improvement_surcharge should not be negative
+--	l. Total amount negative should not be negaative
+
+---------------------------------------------------------------------------------------------------------------
+--	Create External Table
+---------------------------------------------------------------------------------------------------------------
+---------------------------------------------------------------------------------------------------------------
+
+
+CREATE EXTERNAL TABLE nyc_taxi_data(
+`VendorID` int,
+`tpep_pickup_datetime` string,
+`tpep_dropoff_datetime` string,
+`passenger_count` int,
+`trip_distance` double,
+`RatecodeID` int,
+`store_and_fwd_flag` string,
+`PULocationID` int,
+`DOLocationID` int,
+`payment_type` int,
+`fare_amount` double,
+`extra` double,
+`mta_tax` double,
+`tip_amount` double,
+`tolls_amount` double,
+`improvement_surcharge` double,
+`total_amount` double)
+ROW FORMAT DELIMITED FIELDS TERMINATED BY ','
+STORED AS TEXTFILE
+LOCATION '/common_folder/nyc_taxi_data/'
+tblproperties ("skip.header.line.count"="2");
+
+---------------------------------------------------------------------------------------------------------------
+
+
+
+---------------------------------------------------------------------------------------------------------------
+--Basic Data Quality Checks
+---------------------------------------------------------------------------------------------------------------
+---------------------------------------------------------------------------------------------------------------
+
+-- 1.How many records has each TPEP provider provided? Write a query that summarises the number of records of each provider.
+
+	SELECT VendorID,
+       count(*) AS records_per_tpep
+    FROM viddb.nyc_taxi_data
+    GROUP BY VendorID;
+
+-- Answer: Vendor 1 - 8447149 , Vendor 2 - 10345930
+---------------------------------------------------------------------------------------------------------------
+-- 2. The data provided is for months November and December only. Check whether the data is consistent, and if not, identify the 
+--    data quality issues. Mention all data quality issues in comments.
+
+    SELECT VendorID,
+       count(*)
+    FROM viddb.nyc_taxi_data
+    WHERE (month(tpep_pickup_datetime)!= 11
+       AND month(tpep_pickup_datetime)!= 12)
+       OR year(tpep_pickup_datetime)!= 2017
+    GROUP BY VendorID;
+
+-- Issues Found:
+-- 1.There are months other than Nov and Dec
+-- 2.Year is also wrongly given ,with values other than 2017
+---------------------------------------------------------------------------------------------------------------
+-- 3. You might have encountered unusual or erroneous rows in the dataset. Can you conclude which vendor is doing a bad job in providing the 
+--    records using different columns of the dataset? Summarise your conclusions based on every column where these errors are present. For 
+--    example,  There are unusual passenger count i.e 0 or 192 which is unusual.
+
+select VendorID, count(*) from viddb.nyc_taxi_data
+where ((month(tpep_pickup_datetime)!= 11 and month(tpep_pickup_datetime)!= 12)
+or   year(tpep_pickup_datetime)!= 2017 )
+or   trip_distance == 0
+or   (RatecodeID < 1 or RatecodeID >6 )
+or   fare_amount <= 0
+or   (passenger_count == 0 or passenger_count > 8)
+or   (extra != 0.0 and extra != 1.0 and extra != 0.5 and extra != 1.5)
+or   (mta_tax !=  0.5 and mta_tax != 0.0)
+or   tolls_amount < 0
+or   total_amount <= 0
+or   improvement_surcharge < 0
+or   ((payment_type != 1 and tip_amount != 0.0) or (payment_type = 1 and tip_amount < 0.0 and tip_amount > fare_amount))
+group by VendorID;
+
+-- Answer: Vendor 1 is doing  bad job as compared to Vendor 2.Vendor 1 has almost twice erreneous information as compared to Vendor 2
+---------------------------------------------------------------------------------------------------------------
+---------------------------------------------------------------------------------------------------------------
+--					Create ORC partitioned table
+---------------------------------------------------------------------------------------------------------------
+---------------------------------------------------------------------------------------------------------------
+
+-- 1. Load the jars
+	SET hive.exec.max.dynamic.partitions=100000;
+	SET hive.exec.max.dynamic.partitions.pernode=100000;
+
+---------------------------------------------------------------------------------------------------------------
+-- 1. Create partiton table
+create external table nyc_taxi_data_partitioned_month_day(
+VendorID int,tpep_pickup_datetime string,tpep_dropoff_datetime string,passenger_count int,trip_distance double,RatecodeID int, store_and_fwd_flag string, PULocationID int, DOLocationID int,
+payment_type int,fare_amount double, extra double, mta_tax double,tip_amount double,tolls_amount double, improvement_surcharge double,total_amount double) partitioned by(mnth int,dy int)
+location '/user/vidya85_gmail/'
+---------------------------------------------------------------------------------------------------------------
+-- 2. Insert the data
+	INSERT overwrite TABLE nyc_taxi_data_partitioned_month_day partition(mnth,dy)
+	SELECT VendorID,
+       tpep_pickup_datetime,
+       tpep_dropoff_datetime,
+       passenger_count,
+       trip_distance,
+       RatecodeID,
+       store_and_fwd_flag,
+       PULocationID,
+       DOLocationID,
+       payment_type,
+       fare_amount,
+       extra,
+       mta_tax,
+       tip_amount,
+       tolls_amount,
+       improvement_surcharge,
+       total_amount,
+       month(tpep_pickup_datetime)AS mnth,
+       day(tpep_pickup_datetime)AS dy
+	FROM viddb.nyc_taxi_data
+	WHERE ((month(tpep_pickup_datetime)== 11
+        OR month(tpep_pickup_datetime) == 12)
+       AND year(tpep_pickup_datetime) == 2017)
+	AND ((month(tpep_dropoff_datetime) == 11
+        OR month(tpep_dropoff_datetime) == 12)
+       AND year(tpep_dropoff_datetime) == 2017)
+	AND (passenger_count > 0
+       AND passenger_count <= 8)
+	AND trip_distance > 0.0
+	AND (RatecodeID >= 1
+       AND RatecodeID <= 6)
+	AND fare_amount > 0.0
+	AND (extra == 0.5
+       OR extra ==1
+       OR extra ==0
+       OR extra == 1.5)
+	AND improvement_surcharge >= 0.0
+	AND (mta_tax == 0.5
+       OR mta_tax == 0)
+	AND tolls_amount >= 0.0
+	AND total_amount > 0.0
+	AND ((payment_type != 1
+        AND tip_amount == 0.0)
+       OR (payment_type == 1
+           AND tip_amount >= 0.0
+           AND tip_amount <= fare_amount));
+
+---------------------------------------------------------------------------------------------------------------
+
+-- 3. Create ORC Partition table
+--    Assumption: the partition location '/user/vidya85_gmail/partition_orc' is available 
+create external table if not exists nyc_taxi_data_partitioned_month_day_orc(
+VendorID int,tpep_pickup_datetime string,tpep_dropoff_datetime string,passenger_count int,trip_distance double,RatecodeID int, store_and_fwd_flag string, PULocationID int, DOLocationID int,
+payment_type int,fare_amount double, extra double, mta_tax double,tip_amount double,tolls_amount double, improvement_surcharge double,total_amount double) partitioned by(mnth int,dy int)
+stored as orc location '/user/vidya85_gmail/partition_orc'
+tblproperties ("orc.compress"="SNAPPY");
+
+---------------------------------------------------------------------------------------------------------------
+
+-- 4. Insert value into orc partition table
+	INSERT overwrite TABLE nyc_taxi_data_partitioned_month_day_orc partition(mnth,dy)
+	SELECT *
+	FROM viddb.nyc_taxi_data_partitioned_month_day;
+
+---------------------------------------------------------------------------------------------------------------
+---------------------------------------------------------------------------------------------------------------
+--					Analysis 1
+---------------------------------------------------------------------------------------------------------------
+---------------------------------------------------------------------------------------------------------------
+
+-- 1.Compare the overall average fare per trip for November and December.
+-- Assumption:  We assume average fare amount and not the total amount paid for the trip
+
+	SELECT mnth AS month_of_trip,
+		avg(fare_amount)AS avg_fare_amount
+	FROM viddb.nyc_taxi_data_partitioned_month_day_orc
+	GROUP BY mnth;
+
+---------------------------------------------------------------------------------------------------------------
+
+-- 2.Explore the ‘number of passengers per trip’ - how many trips are made by each level of ‘Passenger_count’? Do most people travel solo or with other people?
+-- Assumption :
+
+	SELECT passenger_count,
+		count(*) AS no_of_trips
+	FROM viddb.nyc_taxi_data_partitioned_month_day_orc
+	GROUP BY passenger_count
+	ORDER BY passenger_count ASC;
+	
+-- Answer: Yes , most people travel solo
+---------------------------------------------------------------------------------------------------------------
+
+-- 3. Which is the most preferred mode of payment?
+	SELECT payment_type,
+		count(*) AS number_of_payments
+	FROM viddb.nyc_taxi_data_partitioned_month_day_orc
+	GROUP BY payment_type
+	ORDER BY number_of_payments DESC
+	LIMIT 1;
+
+--	Answer:  Credit card is the most preffered payment type.
+---------------------------------------------------------------------------------------------------------------
+
+-- 4. What is the average tip paid per trip? Compare the average tip with the 25th, 50th and 75th percentiles and comment whether the ‘average tip’ is a representative statistic (of 
+--    the central tendency) of ‘tip amount paid’. Hint: You may use percentile_approx(DOUBLE col, p): Returns an approximate pth percentile of a numeric column (including floating point
+-- 	types) in the group.
+	  
+	SELECT avg(tip_amount) AS average_tip_amount,
+       percentile_approx(tip_amount, 0.25) AS 25th_percentile,
+       percentile_approx(tip_amount, 0.50) AS 50th_percentile,
+       percentile_approx(tip_amount, 0.75) AS 75th_percentile
+	FROM viddb.nyc_taxi_data_partitioned_month_day_orc;
+	
+-- Answer: Yes
+---------------------------------------------------------------------------------------------------------------
+
+-- 5. Explore the ‘Extra’ (charge) variable - what fraction of total trips have an extra charge is levied?
+    
+    SELECT trips_with_extra / total_trips AS percent_of_trips_with_extra_charge
+    FROM
+        (SELECT count(*) AS trips_with_extra
+        FROM viddb.nyc_taxi_data_partitioned_month_day_orc
+        WHERE extra != 0)t1,
+
+        (SELECT count(*) AS total_trips
+        FROM viddb.nyc_taxi_data_partitioned_month_day_orc) t2;
+
+-- Answer: 0.46125977661646104
+---------------------------------------------------------------------------------------------------------------
+---------------------------------------------------------------------------------------------------------------
+--					Analysis 2
+---------------------------------------------------------------------------------------------------------------
+---------------------------------------------------------------------------------------------------------------
+
+-- 1. What is the correlation between the number of passengers on any given trip, and the tip paid per trip? Do multiple travellers tip more 
+--	  compared to solo travellers? Hint: Use CORR(Col_1, Col_2)
+
+
+    SELECT corr(passenger_count,tip_amount)
+    FROM viddb.nyc_taxi_data_partitioned_month_day_orc;
+    
+-- Answer: correlation is -0.00486 . Correlation is negative. Hence, multiple travellers pay less as compared to solo travellers,however this co-relation
+--         is minimal
+
+---------------------------------------------------------------------------------------------------------------
+-- 2. Segregate the data into five segments of ‘tip paid’: [0-5), [5-10), [10-15) , [15-20) and >=20. Calculate the percentage share of 
+--    each bucket (i.e. the fraction of trips falling in each bucket).
+
+    SELECT b.tip_bucket,
+       b.frequency,
+       b.frequency/c.total_trips AS ratio
+    FROM
+    (SELECT a.tip_bucket,
+          count(*) AS frequency
+    FROM
+     (SELECT tip_amount,
+             CASE
+                 WHEN tip_amount >= 0
+                      AND tip_amount <5 THEN '0_5'
+                 WHEN tip_amount >=5
+                      AND tip_amount < 10 THEN '5_10'
+                 WHEN tip_amount >=10
+                      AND tip_amount < 15 THEN '10_15'
+                 WHEN tip_amount >=15
+                      AND tip_amount < 20 THEN '15_20'
+                 ELSE '_>=20'
+             END AS tip_bucket
+      FROM viddb.nyc_taxi_data_partitioned_month_day_orc )a
+     GROUP BY a.tip_bucket) b,
+
+    (SELECT count(*) AS total_trips
+    FROM viddb.nyc_taxi_data_partitioned_month_day_orc)c;
+
+---------------------------------------------------------------------------------------------------------------
+
+-- 3. Which month has a greater average ‘speed’ - November or December? Note that the variable ‘speed’ will have to be derived from other metrics.
+--    Hint: You have columns for distance and time.    
+    
+     SELECT mnth as month_of_year,avg(trip_distance / trip_time) AS average_speed
+     FROM
+        (SELECT mnth,trip_distance,(unix_timestamp(tpep_dropoff_datetime)- unix_timestamp(tpep_pickup_datetime) )/3600 AS trip_time
+        FROM viddb.nyc_taxi_data_partitioned_month_day_orc
+        )t1
+     group by mnth;
+     
+     --Answer : Speeds are almost same for November and December
+---------------------------------------------------------------------------------------------------------------     
+     
+-- 4. Analyse the average speed of the most happening days of the year, i.e. 31st December (New year’s eve) and 25th December 
+--     (Christmas Eve) and compare it with the overall average. 
+      SELECT AVG(CASE
+               WHEN mnth=12
+                    AND dy=25 THEN (trip_distance/((unix_timestamp(tpep_dropoff_datetime)-unix_timestamp(tpep_pickup_datetime))/3600))
+           END)AS christmas_avg_speed,
+       avg(CASE
+               WHEN mnth=12
+                    AND dy=31 THEN (trip_distance/((unix_timestamp(tpep_dropoff_datetime)-unix_timestamp(tpep_pickup_datetime))/3600))
+           END)AS newyear_avg_speed,
+       avg(trip_distance / ((unix_timestamp(tpep_dropoff_datetime)- unix_timestamp(tpep_pickup_datetime))/3600)) AS overall_avg_speed
+      FROM viddb.nyc_taxi_data_partitioned_month_day_orc;
+      
+    ---------------------------------------------------------------------------------------------------------------
